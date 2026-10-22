@@ -1,4 +1,4 @@
-# Analyzing Claude Opus 5 Token Consumption on Human-Written Clean Code and AI-Generated Code
+### Analyzing Claude Opus 5 Token Consumption on Human-Written Clean Code and AI-Generated Code
 
 > Currently repository contains three files.
 

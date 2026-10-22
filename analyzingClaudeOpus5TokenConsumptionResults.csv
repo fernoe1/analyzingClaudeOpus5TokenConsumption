@@ -1,0 +1,276 @@
+hm_index,code_origin,input_tokens,output_tokens,total_tokens,claude_output
+gj235730,chatgpt,494,4096,4590,"## Implementation
+
+The key ideas:
+
+* **Recurse** into `Map`s, `Collection`s and arrays instead of returning them untouched.
+* **Preserve the original type** of every value: scalars (`String`, `Number`, `Boolean`, `Character`) are immutable, so they are returned as‑is; containers are rebuilt with a container *of the same kind* (`LinkedHashMap` stays a `LinkedHashMap`, `TreeMap` keeps its `Comparator`, `EnumMap`/`EnumSet` keep their key type, arrays keep their component type…).
+* **Empty collections/maps survive** – they produce an empty container of the same kind rather than `null` or an exception.
+* **Enum members are returned identically** (`==`, `switch` and `ordinal()` still work). Note the check is `value instanceof Enum`, *not* `getClass().isEnum()`, because a constant with a body (e.g. `OP { ... }`) is an anonymous subclass whose `isEnum()` returns `false` – the original code would have rejected it.
+* `null` is a legal value, and self‑referencing structures are handled through an identity map so recursion can’t loop forever.
+
+```java
+import java.lang.reflect.Array;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Modifier;
+import java.util.*;
+
+/** Recursively reads a value, keeping the original"
+gj235730,deepseek,572,4096,4668,"## Overview
+
+The original implementation had three problems:
+
+1. **It wasn't recursive** – nested containers were handed off to `Gson` in one shot, so everything inside them came back as `LinkedTreeMap` / `ArrayList` of `Double`/`String`.
+2. **It destroyed the original type** – every number became a `Double`, so `1` came back as `1.0`, `BigDecimal`/`Long`/`Integer` were all flattened.
+3. **Enums and empty collections were lost** – an enum constant became a bare `String`, and the only way to get a value in at all was through JSON text, which cannot represent an enum member and cannot tell an empty `Set` from an empty `List`.
+
+The fix is to walk the value graph itself (not its JSON rendering), classify every node, and rebuild containers node-by-node so that each leaf keeps the exact type it came in with. Empty maps/collections still classify as `MAP`/`LIST` (they're not mistaken for ""no value""), and enum constants are kept **as the constant**, with their own `Kind.ENUM`.
+
+A JSON entry point is kept for backwards compatibility, but it too is now recursive and preserves integral vs. fractional numbers.
+
+```java
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import com.google.gson.JsonPrimitive;
+
+import java.lang.reflect.Array;
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.SortedMap;
+import java.util.SortedSet;
+import java.util.TreeMap;
+import java.util.TreeSet;
+
+/**
+ * Classifies a configuration value and normalises it, recursing into nested
+ * maps / collections / arrays. Every leaf keeps its original runtime type:
+ * an {@code Integer} stays an {@code Integer}, a {@code BigDecimal} stays a
+ * {@code BigDecimal}, and an enum constant stays that very constant.
+ */
+public class ValueReader {
+
+    /** Kind of a value, including the ones JSON cannot express. */
+    public enum Kind {
+        NULL, BOOLEAN, NUMBER, STRING, ENUM, LIST, MAP
+    }
+
+    /** Immutable (kind, value) pair. */
+    public static final class OptionKindAndValue {
+
+        private final Kind kind;
+        private final Object value;
+
+        public OptionKindAndValue(Kind kind, Object value) {
+            this.kind = kind;
+            this.value = value;
+        }
+
+        public Kind getKind() {
+            return kind;
+        }
+
+        public Object getValue() {
+            return value;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof OptionKindAndValue)) {
+                return false;
+            }
+            OptionKindAndValue other = (OptionKindAndValue) o;
+            return kind == other.kind
+                    && (value == null ? other.value == null : value.equals(other.value));
+        }
+
+        @Override
+        public int hashCode() {
+            return 31 * kind.hashCode() + (value == null ? 0 : value.hashCode());
+        }
+
+        @Override
+        public String toString() {
+            return kind + ""("" + value + "")"";
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Public API
+    // ------------------------------------------------------------------
+
+    /**
+     * Reads an in-memory value (the preferred entry point: it is the only one
+     * that can carry enum members, {@code Set}s, arrays and exact numeric types).
+     */
+    public OptionKindAndValue readKindAndValue(Object value) {
+        return classify(value, new IdentityHashMap<Object, Boolean>());
+    }
+
+    /**
+     * Reads a JSON document. Kept for compatibility; nested elements are
+     * converted recursively and integral numbers are not turned into doubles.
+     */
+    public OptionKindAndValue readKindAndValueFromJson(String json) {
+        return readKindAndValue(fromJson(JsonParser.parseString(json)));
+    }
+
+    // ------------------------------------------------------------------
+    // Recursive classification
+    // ------------------------------------------------------------------
+
+    private OptionKindAndValue classify(Object value, IdentityHashMap<Object, Boolean> seen) {
+        if (value == null) {
+            return new OptionKindAndValue(Kind.NULL, null);
+        }
+
+        // Already-classified values pass straight through (idempotent).
+        if (value instanceof OptionKindAndValue) {
+            return (OptionKindAndValue) value;
+        }
+
+        // Enums first: they are also Comparable/Serializable and some are
+        // even implemented with bodies, so they must not fall through to
+        // the generic branches below. The constant itself is preserved.
+        if (value instanceof Enum) {
+            return new OptionKindAndValue(Kind.ENUM, value);
+        }
+
+        if (value instanceof Boolean) {
+            return new OptionKindAndValue(Kind.BOOLEAN, value);
+        }
+
+        // Integer /"
+gj235730,human,470,4096,4566,
+gj235730,qwen,210,4096,4306,"## Overview
+
+`readKindAndValue()` is the single entry point used for *every* value in the stream – top‑level and nested alike. It
+
+1. reads the **kind tag** first,
+2. dispatches to a reader for that kind,
+3. **recurses through itself** for every element / key / value of a container, so a nested element keeps its *own* kind tag (an `Integer` inside a `List<Object>` stays an `Integer`, a nested empty `Set` stays an empty `Set`, …),
+4. reconstructs the **concrete container class** (so `TreeSet`, `ArrayDeque`, `LinkedHashMap`, `EnumSet` … survive, even when the container is empty, because the class name is written independently of the element count),
+5. restores **enum members** by class + constant name (handling constant‑specific bodies, i.e. anonymous enum subclasses), and `EnumSet`/`EnumMap` via their element type.
+
+```java
+/** Tag written in front of every value (top-level and nested). */
+private enum OptionKind {
+    NULL,
+    BOOLEAN, BYTE, SHORT, CHAR, INT, LONG, FLOAT, DOUBLE,
+    STRING, BIG_INTEGER, BIG_DECIMAL,
+    ENUM, ENUM_SET, ENUM_MAP,
+    COLLECTION, MAP, ARRAY
+}
+```
+
+## Implementation
+
+```java
+    private static final int MAX_DEPTH = 64;   // guard against hostile/looping input
+
+    private int depth;                         // current nesting level
+
+    /**
+     * Reads one tagged value: first its {@link OptionKind}, then the payload for
+     * that kind. Containers are decoded by recursively calling this method for
+     * each nested element, so every value keeps the exact type it was written
+     * with - including empty collections/maps/arrays and enum members.
+     */
+    private OptionKindAndValue readKindAndValue() throws IOException {
+        if (++depth > MAX_DEPTH) {
+            throw new IOException(""Option value nested too deeply (> "" + MAX_DEPTH + "")"");
+        }
+        try {
+            OptionKind kind = readKind();
+            return new OptionKindAndValue(kind, readValue(kind));
+        } finally {
+            --depth;
+        }
+    }
+
+    private OptionKind readKind() throws IOException {
+        int ordinal = in.readUnsignedByte();
+        OptionKind[] kinds = OptionKind.values();
+        if (ordinal >= kinds.length) {
+            throw new IOException(""Unknown option kind tag: "" + ordinal);
+        }
+        return kinds[ordinal];
+    }
+
+    /** Convenience for nested reads: we only need the value, the kind is self-describing. */
+    private Object readNestedValue() throws IOException {
+        return readKindAndValue().getValue();
+    }
+
+    private Object readValue(OptionKind kind) throws IOException {
+        switch (kind) {
+            case NULL:        return null;
+            case BOOLEAN:     return in.readBoolean();
+            case BYTE:        return in.readByte();
+            case SHORT:       return in.readShort();
+            case CHAR:        return in.readChar();
+            case INT:         return in.readInt();
+            case LONG:        return in.readLong();
+            case FLOAT:       return in.readFloat();
+            case DOUBLE:      return in.readDouble();
+            case STRING:      return in.readUTF();
+            case BIG_INTEGER: return new java.math.BigInteger(in.readUTF());
+            case BIG_DECIMAL: return new java.math.BigDecimal(in.readUTF());
+
+            case ENUM:        return readEnum();
+            case ENUM_SET:    return readEnumSet();
+            case ENUM_MAP:    return readEnumMap();
+
+            case COLLECTION:  return readCollection();
+            case MAP:         return readMap();
+            case ARRAY:       return readArray();
+
+            default:
+                throw new IOException(""Unsupported option kind: "" + kind);
+        }
+    }
+
+    // ------------------------------------------------------------------ enums
+
+    @SuppressWarnings({""unchecked"", ""rawtypes""})
+    private Object readEnum() throws IOException {
+        Class<?> type     = resolveEnumClass(in.readUTF());
+        String   constant = in.readUTF();
+        try {
+            return Enum.valueOf((Class<? extends Enum>) type, constant);
+        } catch (IllegalArgumentException e) {
+            throw new IOException(""No enum constant "" + type.getName() + ""."" + constant, e);
+        }
+    }
+
+    /** Constant-specific bodies produce anonymous subclasses; map them to the enum itself. */
+    private Class<?> resolveEnumClass(String name) throws IOException {
+        Class<?> c = resolveClass(name);
+        while (c != null && !c.isEnum()) {
+            c = c.getSuperclass();
+        }
+        if (c == null) {
+            throw new IOException(name + "" is not an enum type"");
+        }
+        return c;
+    }
+
+    @SuppressWarnings({""unchecked"", ""rawtypes""})
+    private Object readEnumSet() throws IOException {
+        Class<? extends Enum> elementType = (Class<? extends Enum>) resolveEnumClass(in.readUTF());
+        int size = readSize();
+        // noneOf() keeps the EnumSet type (and its element type) even when size == 0
+        Enum"
